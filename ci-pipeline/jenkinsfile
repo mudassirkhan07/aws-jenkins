@@ -5,16 +5,10 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         skipDefaultCheckout(true)
-        timeout(time: 1, unit: 'HOURS')
+        timeout(time: 30, unit: 'MINUTES')
     }
 
     parameters {
-        choice(
-            name: 'ACTION',
-            choices: ['apply', 'destroy'],
-            description: 'apply = create/update infrastructure, destroy = tear it all down'
-        )
-
         string(
             name: 'AMI_ID',
             defaultValue: 'ami-0f8a61b66d1accaee',
@@ -66,6 +60,12 @@ pipeline {
             }
         }
 
+        stage('Terraform Format Check') {
+            steps {
+                sh 'terraform fmt -check -recursive -no-color'
+            }
+        }
+
         stage('Terraform Init') {
             steps {
                 sh 'terraform init -input=false -no-color'
@@ -80,60 +80,23 @@ pipeline {
 
         stage('Terraform Plan') {
             steps {
-                script {
-                    def destroyFlag = (params.ACTION == 'destroy') ? '-destroy' : ''
-                    sh """
-                        set -e
-                        terraform plan \
-                            -input=false \
-                            -no-color \
-                            ${destroyFlag} \
-                            -out=tfplan
-
-                        terraform show -no-color tfplan > plan.txt
-                    """
-                }
+                sh '''
+                    set -e
+                    terraform plan -input=false -no-color -out=tfplan
+                    terraform show -no-color tfplan > plan.txt
+                '''
                 archiveArtifacts artifacts: 'plan.txt', fingerprint: true
-            }
-        }
-
-        stage('Approval') {
-            steps {
-                script {
-                    echo readFile('plan.txt')
-                    timeout(time: 30, unit: 'MINUTES') {
-                        input(
-                            message: "Review the plan above. Proceed with terraform ${params.ACTION}?",
-                            ok: "Yes, ${params.ACTION}"
-                        )
-                    }
-                }
-            }
-        }
-
-        stage('Terraform Apply') {
-            steps {
-                sh 'terraform apply -input=false -no-color tfplan'
-            }
-        }
-
-        stage('Show Outputs') {
-            when {
-                expression { params.ACTION == 'apply' }
-            }
-            steps {
-                sh 'terraform output -no-color || true'
             }
         }
     }
 
     post {
         success {
-            echo "Terraform ${params.ACTION} completed successfully."
+            echo 'CI checks passed: format, validate and plan succeeded.'
         }
 
         failure {
-            echo 'Pipeline failed. Review the failed stage in Console Output.'
+            echo 'CI failed. Review the failed stage in Console Output.'
         }
 
         aborted {
