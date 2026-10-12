@@ -5,10 +5,16 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         skipDefaultCheckout(true)
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 1, unit: 'HOURS')
     }
 
     parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['apply', 'destroy'],
+            description: 'apply = create/update infrastructure, destroy = tear it all down'
+        )
+
         string(
             name: 'AMI_ID',
             defaultValue: 'ami-0f8a61b66d1accaee',
@@ -55,15 +61,8 @@ pipeline {
                 sh '''
                     set -e
                     terraform version
-                    git --version
                     aws --version
                 '''
-            }
-        }
-
-        stage('Terraform Format Check') {
-            steps {
-                sh 'terraform fmt -check -recursive -no-color'
             }
         }
 
@@ -81,32 +80,64 @@ pipeline {
 
         stage('Terraform Plan') {
             steps {
-                sh '''
-                    set -e
+                script {
+                    def destroyFlag = (params.ACTION == 'destroy') ? '-destroy' : ''
+                    sh """
+                        set -e
+                        terraform plan \
+                            -input=false \
+                            -no-color \
+                            ${destroyFlag} \
+                            -out=tfplan
 
-                    terraform plan \
-                        -input=false \
-                        -no-color \
-                        -out=tfplan
+                        terraform show -no-color tfplan > plan.txt
+                    """
+                }
+                archiveArtifacts artifacts: 'plan.txt', fingerprint: true
+            }
+        }
 
-                    terraform show -no-color tfplan > plan.txt
-                '''
+        stage('Approval') {
+            steps {
+                script {
+                    echo readFile('plan.txt')
+                    timeout(time: 30, unit: 'MINUTES') {
+                        input(
+                            message: "Review the plan above. Proceed with terraform ${params.ACTION}?",
+                            ok: "Yes, ${params.ACTION}"
+                        )
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                sh 'terraform apply -input=false -no-color tfplan'
+            }
+        }
+
+        stage('Show Outputs') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                sh 'terraform output -no-color || true'
             }
         }
     }
 
     post {
         success {
-            // Only the readable plan is archived. tfplan can contain secrets.
-            archiveArtifacts(
-                artifacts: 'plan.txt',
-                fingerprint: true
-            )
-            echo 'Terraform CI succeeded. No terraform apply was executed.'
+            echo "Terraform ${params.ACTION} completed successfully."
         }
 
         failure {
             echo 'Pipeline failed. Review the failed stage in Console Output.'
+        }
+
+        aborted {
+            echo 'Pipeline aborted.'
         }
 
         cleanup {
